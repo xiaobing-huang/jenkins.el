@@ -114,11 +114,11 @@
 (defun jenkins-list-format ()
   "List of columns for main jenkins jobs screen."
   (apply 'vector
-  `(("#" ,jenkins-colwidth-id f :pad-right 2 :right-align t :col-source jenkins--render-indicator)
-	("Name" ,jenkins-colwidth-name t :col-source jenkins--render-name)
-	("Last success" ,jenkins-colwidth-last-status f :col-source :last-success)
-	("Last failed" ,jenkins-colwidth-last-status f :col-source :last-failed))
- ))
+         `(("#" ,jenkins-colwidth-id f :pad-right 2 :right-align t :col-source jenkins--render-indicator)
+	   ("Name" ,jenkins-colwidth-name t :col-source jenkins--render-name)
+	   ("Last success" ,jenkins-colwidth-last-status f :col-source :last-success)
+	   ("Last failed" ,jenkins-colwidth-last-status f :col-source :last-failed))
+         ))
 
 (defun get-jenkins-url ()
   "This function is for backward compatibility."
@@ -299,38 +299,38 @@
 (defun jenkins-get-job-details (jobname)
   "Make to particular JOBNAME call."
   (cl-labels ((retrieve (attr item)
-                        (cdr (assoc attr item)))
+                (cdr (assoc attr item)))
               (convert-item (item)
-                  (list
-                   (retrieve 'number item)
-                   :author (let ((culprits (cdr (assoc 'culprits values))))
-                             (if (> (length culprits) 0)
-                                 (cdar (aref culprits 0)) "---"))
-                   :url (retrieve 'url item)
-                   :timestring (jenkins--time-since-to-text (/ (retrieve 'timestamp item) 1000))
-                   :building (retrieve 'building item)
-                   :result (retrieve 'result item)))
+                (list
+                 (retrieve 'number item)
+                 :author (let ((culprits (cdr (assoc 'culprits values))))
+                           (if (> (length culprits) 0)
+                               (cdar (aref culprits 0)) "---"))
+                 :url (retrieve 'url item)
+                 :timestring (jenkins--time-since-to-text (/ (retrieve 'timestamp item) 1000))
+                 :building (retrieve 'building item)
+                 :result (retrieve 'result item)))
               (vector-take (N vec)
                 (--map
                  (aref vec it)
                  (number-sequence 0 (1- (min  N (length vec)))))))
     (let* (
-         (job-url (jenkins-job-url jobname))
-         (raw-data (jenkins--retrieve-page-as-json job-url))
-         (builds (-map #'convert-item (vector-take 25 (alist-get 'builds raw-data))))
-         (latestSuccessful
-          (caar (--filter (equal (plist-get (cdr it) :result) "SUCCESS") builds)))
-         (latestFailed
-          (caar (--filter (equal (plist-get (cdr it) :result) "FAILURE") builds)))
-         (latestFinished
-          (caar (--filter (equal (plist-get (cdr it) :building) :json-false) builds)))
-         )
-    (list :name jobname
-          :builds builds
-          :latestSuccessful latestSuccessful
-          :latestFailed latestFailed
-          :latestFinished latestFinished
-          ))))
+           (job-url (jenkins-job-url jobname))
+           (raw-data (jenkins--retrieve-page-as-json job-url))
+           (builds (-map #'convert-item (vector-take 25 (alist-get 'builds raw-data))))
+           (latestSuccessful
+            (caar (--filter (equal (plist-get (cdr it) :result) "SUCCESS") builds)))
+           (latestFailed
+            (caar (--filter (equal (plist-get (cdr it) :result) "FAILURE") builds)))
+           (latestFinished
+            (caar (--filter (equal (plist-get (cdr it) :building) :json-false) builds)))
+           )
+      (list :name jobname
+            :builds builds
+            :latestSuccessful latestSuccessful
+            :latestFailed latestFailed
+            :latestFinished latestFinished
+            ))))
 
 ;; helpers
 (defun jenkins-visit-jenkins-web-page ()
@@ -373,16 +373,45 @@
   (let* ((props (text-properties-at (point) (current-buffer)))
          (jenkins-tag (member 'jenkins-build-number props))
          (build-number (and jenkins-tag
-                          (cadr jenkins-tag))))
+                            (cadr jenkins-tag))))
     (if build-number
         (jenkins-get-console-output jenkins-local-jobname build-number)
       (error "Not on a Jenkins build line"))))
+
+(defun jenkins-mode-map-setup-for-evil ()
+  "Set up jenkins-mode-map for evil-mode."
+  (when (bound-and-true-p evil-mode)
+    (evil-define-key 'normal jenkins-mode-map
+      "b" 'jenkins--call-build-job-from-main-screen)
+    (evil-define-key 'normal jenkins-mode-map
+      (kbd "r") 'jenkins--call-rebuild-job-from-main-screen)
+    (evil-define-key 'normal jenkins-mode-map
+      (kbd "v") 'jenkins--visit-job-from-main-screen)
+    (evil-define-key 'normal jenkins-mode-map
+      (kbd "RET") 'jenkins-enter-job)))
+
+(defun jenkins-job-view-mode-map-setup-for-evil ()
+  "Set up jenkins-job-view-mode-map for evil-mode."
+  (when (bound-and-true-p evil-mode)
+    (evil-define-key 'normal jenkins-job-view-mode-map
+      (kbd "1") 'jenkins-job-details-toggle)
+    (evil-define-key 'insert jenkins-job-view-mode-map
+      (kbd "g") 'jenkins--refresh-job-from-job-screen)
+    (evil-define-key 'normal jenkins-job-view-mode-map
+      (kbd "b") 'jenkins--call-build-job-from-job-screen)
+    (evil-define-key 'normal jenkins-job-view-mode-map
+      (kbd "r") 'jenkins--call-rebuild-job-from-job-screen)
+    (evil-define-key 'normal jenkins-job-view-mode-map
+      (kbd "v") 'jenkins--visit-job-from-job-screen)
+    (evil-define-key 'normal jenkins-job-view-mode-map
+      (kbd "$") 'jenkins--show-console-output-from-job-screen)))
 
 ;; emacs major mode funcs and variables
 (define-derived-mode jenkins-mode tabulated-list-mode "Jenkins"
   "Special mode for jenkins status buffer."
   (setq truncate-lines t)
   (kill-all-local-variables)
+  (jenkins-mode-map-setup-for-evil)
   (setq mode-name "Jenkins")
   (setq major-mode 'jenkins-mode)
   (use-local-map jenkins-mode-map)
@@ -395,6 +424,7 @@
 (define-derived-mode jenkins-job-view-mode special-mode "jenkins-job"
   "Mode for viewing jenkins job details"
   ;; buffer defaults
+  (jenkins-job-view-mode-map-setup-for-evil)
   (setq-local jenkins-local-jobname jobname))
 
 (define-derived-mode jenkins-console-output-mode special-mode "jenkins-console-output"
