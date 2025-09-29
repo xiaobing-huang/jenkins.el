@@ -1,2 +1,4 @@
 *~
 /dump.el
+flycheck_*.el
+/CLAUDE.md
