@@ -1,4 +1,4 @@
-;;; jenkins.el --- Minimalistic Jenkins client for Emacs
+;;; jenkins.el --- Minimalistic Jenkins client for Emacs  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2015  Rustem Muslimov
 
