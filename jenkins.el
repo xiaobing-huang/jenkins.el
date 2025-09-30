@@ -134,6 +134,7 @@
   "Data retrieved from jenkins for main jenkins screen.")
 
 (defvar jenkins-local-jobname)
+(defvar jenkins-local-parameters nil)
 (defvar jenkins-local-jobs-shown nil)
 
 (defun jenkins--render-name (item)
@@ -251,7 +252,7 @@
                         ((string= param-type "TextParameterDefinition") "text")
                         (t "other")))
          (description-with-link (if (and (string= param-type "ChoiceParameterDefinition") choices)
-                                    (format "[[#%s-choices][%s (click for choices)]]" param-name description)
+                                    (format "[[*%s-choices][%s (click for choices)]]" param-name description)
                                   description)))
     (format "| %s | %s | %s | %s |       |"
             param-name
@@ -284,25 +285,42 @@
       (forward-line 4)
       (end-of-line)
       (backward-char 1)
+      (org-table-align)
+      (setq-local truncate-lines t)
+      (setq-local jenkins-local-jobname jobname)
+      (setq-local jenkins-local-parameters parameters)
       (jenkins--setup-parameters-buffer-keymap jobname parameters)
       (pop-to-buffer buffer-name))))
 
+(defun jenkins--get-parameter-type-by-name (param-name parameters)
+  "Get parameter type for PARAM-NAME from PARAMETERS list."
+  (let ((param (cl-find-if (lambda (p)
+                             (string= (cdr (assoc 'name p)) param-name))
+                           parameters)))
+    (when param
+      (cdr (assoc 'type param)))))
+
 (defun jenkins--parse-parameters-from-org-table ()
-  "Parse parameter values from the current org table."
-  (let ((parameters-alist '()))
-    (save-excursion
-      (goto-char (point-min))
-      (when (re-search-forward "^| Parameter " nil t)
-        (forward-line 2)
-        (while (and (looking-at "|") (not (looking-at "|-")))
-          (let ((line (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
-            (when (string-match "^|\\s-*\\([^|]+\\)\\s-*|\\s-*[^|]*\\s-*|\\s-*[^|]*\\s-*|\\s-*[^|]*\\s-*|\\s-*\\([^|]*\\)\\s-*|" line)
-              (let ((param-name (string-trim (match-string 1 line)))
-                    (param-value (string-trim (match-string 2 line))))
-                (unless (string-empty-p param-value)
-                  (push (cons param-name param-value) parameters-alist)))))
-          (forward-line 1))))
-    (reverse parameters-alist)))
+  "Parse parameter values from the current org table using org-table functions."
+  (when (org-at-table-p)
+    (let* ((table-data (org-table-to-lisp))
+           (parameters-alist '()))
+      ;; Skip header row and separator line
+      (dolist (row (cddr table-data))
+        (unless (eq row 'hline)
+          (let* ((param-name (string-trim (nth 0 row)))
+                 (param-default (string-trim (nth 3 row)))
+                 (param-value (string-trim (nth 4 row)))
+                 (raw-value (if (string-empty-p param-value) param-default param-value))
+                 (param-type (jenkins--get-parameter-type-by-name param-name jenkins-local-parameters))
+                 (final-value (if (string= param-type "BooleanParameterDefinition")
+                                  (cond
+                                   ((string= raw-value "t") "true")
+                                   ((or (string= raw-value "nil") (string-empty-p raw-value)) "false")
+                                   (t raw-value))
+                                raw-value)))
+            (push (cons param-name final-value) parameters-alist))))
+      (reverse parameters-alist))))
 
 (defun jenkins--format-parameters-for-post (parameters-alist)
   "Format PARAMETERS-ALIST for HTTP POST request."
@@ -321,14 +339,15 @@
          (build-url (format "%sjob/%s/buildWithParameters" (get-jenkins-url) jobname)))
     (when (y-or-n-p (format "Ready to start %s with %d parameters?" jobname (length parameters-alist)))
       (with-current-buffer (url-retrieve-synchronously build-url)
-        (message (format "Building %s job with parameters started!" jobname)))
-      (kill-buffer (current-buffer)))))
+        (message (format "Building %s job with parameters started!" jobname))
+        ;; (inspector-inspect (buffer-substring-no-properties (point-min) (point-max))))
+      (kill-buffer (current-buffer))))))
 
 (defun jenkins--setup-parameters-buffer-keymap (jobname parameters)
   "Set up local keymap for parameters buffer with JOBNAME and PARAMETERS."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c")
-      (lambda () (interactive) (jenkins--submit-parameters-and-build jobname parameters)))
+      (lambda () (interactive) (jenkins--submit-parameters-and-build jenkins-local-jobname jenkins-local-parameters)))
     (define-key map (kbd "C-c C-k")
       (lambda () (interactive) (kill-buffer (current-buffer))))
     (use-local-map map)))
@@ -420,7 +439,7 @@
          (properties (cdr (assoc 'property raw-data)))
          (param-definitions nil))
     (when properties
-      (dolist (prop properties)
+      (cl-loop for prop across properties do
         (let ((param-defs (cdr (assoc 'parameterDefinitions prop))))
           (when param-defs
             (setq param-definitions (append param-definitions (append param-defs nil))))))
