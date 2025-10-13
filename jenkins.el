@@ -341,15 +341,15 @@
       (with-current-buffer (url-retrieve-synchronously build-url)
         (message (format "Building %s job with parameters started!" jobname))
         ;; (inspector-inspect (buffer-substring-no-properties (point-min) (point-max))))
-      (kill-buffer (current-buffer))))))
+        (kill-buffer (current-buffer))))))
 
 (defun jenkins--setup-parameters-buffer-keymap (jobname parameters)
   "Set up local keymap for parameters buffer with JOBNAME and PARAMETERS."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c")
-      (lambda () (interactive) (jenkins--submit-parameters-and-build jenkins-local-jobname jenkins-local-parameters)))
+                (lambda () (interactive) (jenkins--submit-parameters-and-build jenkins-local-jobname jenkins-local-parameters)))
     (define-key map (kbd "C-c C-k")
-      (lambda () (interactive) (kill-buffer (current-buffer))))
+                (lambda () (interactive) (kill-buffer (current-buffer))))
     (use-local-map map)))
 
 ;;; actions
@@ -440,9 +440,9 @@
          (param-definitions nil))
     (when properties
       (cl-loop for prop across properties do
-        (let ((param-defs (cdr (assoc 'parameterDefinitions prop))))
-          (when param-defs
-            (setq param-definitions (append param-definitions (append param-defs nil))))))
+               (let ((param-defs (cdr (assoc 'parameterDefinitions prop))))
+                 (when param-defs
+                   (setq param-definitions (append param-definitions (append param-defs nil))))))
       param-definitions)))
 
 (defun jenkins-get-job-details (jobname)
@@ -573,8 +573,7 @@
 (define-derived-mode jenkins-job-view-mode special-mode "jenkins-job"
   "Mode for viewing jenkins job details"
   ;; buffer defaults
-  (jenkins-job-view-mode-map-setup-for-evil)
-  (setq-local jenkins-local-jobname jobname))
+  (jenkins-job-view-mode-map-setup-for-evil))
 
 (define-derived-mode jenkins-console-output-mode special-mode "jenkins-console-output"
   "Mode for viewing jenkins console output"
@@ -595,10 +594,12 @@
   "Open JOBNAME details screen."
   (interactive)
   (setq jenkins-local-jobs-shown t)
-  (let ((details-buffer-name (format "*jenkins: %s details*" jobname)))
-    (switch-to-buffer details-buffer-name)
-    (jenkins-job-render jobname)
-    (jenkins-job-view-mode)))
+  (let* ((details-buffer-name (format "*jenkins: %s details*" jobname)))
+    (with-current-buffer (get-buffer-create details-buffer-name)
+      (jenkins-job-render jobname)
+      (jenkins-job-view-mode)
+      (setq-local jenkins-local-jobname jobname))
+    (switch-to-buffer details-buffer-name)))
 
 (defun jenkins-job-details-toggle ()
   "Toggle builds list."
