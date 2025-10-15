@@ -135,6 +135,7 @@
 
 (defvar jenkins-local-jobname)
 (defvar jenkins-local-parameters nil)
+(defvar jenkins-local-parameter-choices nil)
 (defvar jenkins-local-jobs-shown nil)
 
 (defun jenkins--render-name (item)
@@ -220,24 +221,6 @@
 
 ;; parameter handling functions
 
-(defun jenkins--create-choice-section (parameters)
-  "Generate the choices section for PARAMETERS with anchors."
-  (let ((choice-sections ""))
-    (dolist (param parameters)
-      (let ((param-name (cdr (assoc 'name param)))
-            (param-type (cdr (assoc 'type param)))
-            (choices (cdr (assoc 'choices param))))
-        (when (and (string= param-type "ChoiceParameterDefinition") choices)
-          (setq choice-sections
-                (concat choice-sections
-                        (format "** %s-choices\n" param-name)
-                        (mapconcat (lambda (choice) (format "- %s" choice))
-                                   (append choices nil) "\n")
-                        "\n\n")))))
-    (if (> (length choice-sections) 0)
-        (concat "* Available Choices\n" choice-sections)
-      "")))
-
 (defun jenkins--create-parameter-table-row (param)
   "Generate a table row for PARAM with links for choice parameters."
   (let* ((param-name (cdr (assoc 'name param)))
@@ -251,13 +234,14 @@
                         ((string= param-type "ChoiceParameterDefinition") "choice")
                         ((string= param-type "TextParameterDefinition") "text")
                         (t "other")))
-         (description-with-link (if (and (string= param-type "ChoiceParameterDefinition") choices)
-                                    (format "[[*%s-choices][%s (click for choices)]]" param-name description)
-                                  description)))
+         ;; (description-with-link (if (and (string= param-type "ChoiceParameterDefinition") choices)
+         ;;                            (format "[[*%s-choices][%s (click for choices)]]" param-name description)
+         ;;                          description))
+         )
     (format "| %s | %s | %s | %s |       |"
             param-name
             type-display
-            description-with-link
+            description
             (or default-val ""))))
 
 (defun jenkins--parameters-buffer-name (jobname)
@@ -266,21 +250,17 @@
 
 (defun jenkins--create-parameters-buffer (jobname parameters)
   "Create org-mode buffer for JOBNAME with PARAMETERS input table."
-  (let ((buffer-name (jenkins--parameters-buffer-name jobname))
-        (choice-section (jenkins--create-choice-section parameters)))
+  (let ((buffer-name (jenkins--parameters-buffer-name jobname)))
     (with-current-buffer (get-buffer-create buffer-name)
       (erase-buffer)
       (org-mode)
-      (insert (format "* Jenkins Build Parameters for %s\n" jobname))
-      (insert "Press C-c C-c to build with these parameters, C-c C-k to cancel.\n\n")
+      (insert (format "# Edit Jenkins Build Parameters for %s\n" jobname))
+      (insert "# Press C-c C-c to build with these parameters, C-c C-e to edit parameter value, C-c C-k to cancel.\n#\n\n")
       (insert "| Parameter | Type | Description | Default | Value |\n")
       (insert "|-----------+------+-------------+---------+-------|\n")
       (dolist (param parameters)
         (insert (jenkins--create-parameter-table-row param))
         (insert "\n"))
-      (insert "\n")
-      (when (> (length choice-section) 0)
-        (insert choice-section))
       (goto-char (point-min))
       (forward-line 4)
       (end-of-line)
@@ -289,6 +269,14 @@
       (setq-local truncate-lines t)
       (setq-local jenkins-local-jobname jobname)
       (setq-local jenkins-local-parameters parameters)
+      (setq-local jenkins-local-parameter-choices
+                  (mapcar (lambda (param)
+                            (cons (cdr (assoc 'name param))
+                                  (append (cdr (assoc 'choices param)) nil)))
+                          (cl-remove-if-not (lambda (p)
+                                              (string= (cdr (assoc 'type p))
+                                                       "ChoiceParameterDefinition"))
+                                            parameters)))
       (jenkins--setup-parameters-buffer-keymap jobname parameters)
       (pop-to-buffer buffer-name))))
 
@@ -299,6 +287,14 @@
                            parameters)))
     (when param
       (cdr (assoc 'type param)))))
+
+(defun jenkins--get-parameter-choices (param-name parameters)
+  "Get choices for PARAM-NAME from PARAMETERS list."
+  (let ((param (cl-find-if (lambda (p)
+                             (string= (cdr (assoc 'name p)) param-name))
+                           parameters)))
+    (when param
+      (append (cdr (assoc 'choices param)) nil))))
 
 (defun jenkins--parse-parameters-from-org-table ()
   "Parse parameter values from the current org table using org-table functions."
@@ -343,11 +339,42 @@
         ;; (inspector-inspect (buffer-substring-no-properties (point-min) (point-max))))
         (kill-buffer (current-buffer))))))
 
+(defun jenkins--set-param-value ()
+  "Set parameter value based on parameter type."
+  (when (and (org-at-table-p)
+             (> (org-table-current-line) 1))
+    (let* ((param-name (string-trim
+                        (substring-no-properties
+                         (org-table-get-field 1))))
+           (param-type (string-trim
+                        (substring-no-properties
+                         (org-table-get-field 2))))
+           (param-value (string-trim
+                         (substring-no-properties
+                          (org-table-get-field 5)))))
+      (cond
+       ((equal param-type "boolean")
+        (org-table-get-field 5 (if (string= param-value "t") "" "t")))
+       ((equal param-type "string")
+        (org-table-get-field 5 (read-string "String value: " param-value)))
+       ((equal param-type "choice")
+        (let ((choices (cdr (assoc param-name jenkins-local-parameter-choices))))
+          (if choices
+              (org-table-get-field 5 (completing-read
+                                      (format "Choose value for %s: " param-name)
+                                      choices nil t param-value))
+            (org-table-get-field 5 (read-string "Choice value: " param-value)))))
+       ((equal param-type "text")
+        (org-table-get-field 5 (read-string "Text value: " param-value))))
+      (org-table-align))))
+
 (defun jenkins--setup-parameters-buffer-keymap (jobname parameters)
   "Set up local keymap for parameters buffer with JOBNAME and PARAMETERS."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c")
                 (lambda () (interactive) (jenkins--submit-parameters-and-build jenkins-local-jobname jenkins-local-parameters)))
+    (define-key map (kbd "C-c C-e")
+                (lambda () (interactive) (jenkins--set-param-value)))
     (define-key map (kbd "C-c C-k")
                 (lambda () (interactive) (kill-buffer (current-buffer))))
     (use-local-map map)))
@@ -401,7 +428,8 @@
 
 (defun jenkins--retrieve-page-as-json (url)
   "Shortcut for jenkins api URL to return valid json."
-  (let ((url-request-extra-headers (jenkins--get-auth-headers)))
+  (let ((url-request-extra-headers (jenkins--get-auth-headers))
+        (json-false nil))
     (with-current-buffer (url-retrieve-synchronously url)
       (goto-char (point-min))
       (re-search-forward "^$")
