@@ -1,4 +1,4 @@
-;;; jenkins.el --- Minimalistic Jenkins client for Emacs
+;;; jenkins.el --- Minimalistic Jenkins client for Emacs  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2015  Rustem Muslimov
 
@@ -134,6 +134,8 @@
   "Data retrieved from jenkins for main jenkins screen.")
 
 (defvar jenkins-local-jobname)
+(defvar jenkins-local-parameters nil)
+(defvar jenkins-local-parameter-choices nil)
 (defvar jenkins-local-jobs-shown nil)
 
 (defun jenkins--render-name (item)
@@ -217,6 +219,166 @@
             (jenkins-list-format))))
    (mapcar 'cdr *jenkins-jobs-list*)))
 
+;; parameter handling functions
+
+(defun jenkins--create-parameter-table-row (param)
+  "Generate a table row for PARAM with links for choice parameters."
+  (let* ((param-name (cdr (assoc 'name param)))
+         (param-type (cdr (assoc 'type param)))
+         (description (cdr (assoc 'description param)))
+         (default-val (cdr (assoc 'value (assoc 'defaultParameterValue param))))
+         (choices (cdr (assoc 'choices param)))
+         (type-display (cond
+                        ((string= param-type "StringParameterDefinition") "string")
+                        ((string= param-type "BooleanParameterDefinition") "boolean")
+                        ((string= param-type "ChoiceParameterDefinition") "choice")
+                        ((string= param-type "TextParameterDefinition") "text")
+                        (t "other")))
+         ;; (description-with-link (if (and (string= param-type "ChoiceParameterDefinition") choices)
+         ;;                            (format "[[*%s-choices][%s (click for choices)]]" param-name description)
+         ;;                          description))
+         )
+    (format "| %s | %s | %s | %s |       |"
+            param-name
+            type-display
+            description
+            (or default-val ""))))
+
+(defun jenkins--parameters-buffer-name (jobname)
+  "Generate buffer name for JOBNAME parameters."
+  (format "*Jenkins Parameters: %s*" jobname))
+
+(defun jenkins--create-parameters-buffer (jobname parameters)
+  "Create org-mode buffer for JOBNAME with PARAMETERS input table."
+  (let ((buffer-name (jenkins--parameters-buffer-name jobname)))
+    (with-current-buffer (get-buffer-create buffer-name)
+      (erase-buffer)
+      (org-mode)
+      (insert (format "# Edit Jenkins Build Parameters for %s\n" jobname))
+      (insert "# Press C-c C-c to build with these parameters, C-c C-e to edit parameter value, C-c C-k to cancel.\n#\n\n")
+      (insert "| Parameter | Type | Description | Default | Value |\n")
+      (insert "|-----------+------+-------------+---------+-------|\n")
+      (dolist (param parameters)
+        (insert (jenkins--create-parameter-table-row param))
+        (insert "\n"))
+      (goto-char (point-min))
+      (forward-line 4)
+      (end-of-line)
+      (backward-char 1)
+      (org-table-align)
+      (setq-local truncate-lines t)
+      (setq-local jenkins-local-jobname jobname)
+      (setq-local jenkins-local-parameters parameters)
+      (setq-local jenkins-local-parameter-choices
+                  (mapcar (lambda (param)
+                            (cons (cdr (assoc 'name param))
+                                  (append (cdr (assoc 'choices param)) nil)))
+                          (cl-remove-if-not (lambda (p)
+                                              (string= (cdr (assoc 'type p))
+                                                       "ChoiceParameterDefinition"))
+                                            parameters)))
+      (jenkins--setup-parameters-buffer-keymap jobname parameters)
+      (pop-to-buffer buffer-name))))
+
+(defun jenkins--get-parameter-type-by-name (param-name parameters)
+  "Get parameter type for PARAM-NAME from PARAMETERS list."
+  (let ((param (cl-find-if (lambda (p)
+                             (string= (cdr (assoc 'name p)) param-name))
+                           parameters)))
+    (when param
+      (cdr (assoc 'type param)))))
+
+(defun jenkins--get-parameter-choices (param-name parameters)
+  "Get choices for PARAM-NAME from PARAMETERS list."
+  (let ((param (cl-find-if (lambda (p)
+                             (string= (cdr (assoc 'name p)) param-name))
+                           parameters)))
+    (when param
+      (append (cdr (assoc 'choices param)) nil))))
+
+(defun jenkins--parse-parameters-from-org-table ()
+  "Parse parameter values from the current org table using org-table functions."
+  (when (org-at-table-p)
+    (let* ((table-data (org-table-to-lisp))
+           (parameters-alist '()))
+      ;; Skip header row and separator line
+      (dolist (row (cddr table-data))
+        (unless (eq row 'hline)
+          (let* ((param-name (string-trim (nth 0 row)))
+                 (param-default (string-trim (nth 3 row)))
+                 (param-value (string-trim (nth 4 row)))
+                 (raw-value (if (string-empty-p param-value) param-default param-value))
+                 (param-type (jenkins--get-parameter-type-by-name param-name jenkins-local-parameters))
+                 (final-value (if (string= param-type "BooleanParameterDefinition")
+                                  (cond
+                                   ((string= raw-value "t") "true")
+                                   ((or (string= raw-value "nil") (string-empty-p raw-value)) "false")
+                                   (t raw-value))
+                                raw-value)))
+            (push (cons param-name final-value) parameters-alist))))
+      (reverse parameters-alist))))
+
+(defun jenkins--format-parameters-for-post (parameters-alist)
+  "Format PARAMETERS-ALIST for HTTP POST request."
+  (mapconcat (lambda (param)
+               (format "%s=%s"
+                       (url-hexify-string (car param))
+                       (url-hexify-string (cdr param))))
+             parameters-alist "&"))
+
+(defun jenkins--submit-parameters-and-build (jobname parameters)
+  "Submit parameters and build JOBNAME with PARAMETERS."
+  (let* ((parameters-alist (jenkins--parse-parameters-from-org-table))
+         (url-request-extra-headers (jenkins--get-auth-headers))
+         (url-request-method "POST")
+         (url-request-data (jenkins--format-parameters-for-post parameters-alist))
+         (build-url (format "%sjob/%s/buildWithParameters" (get-jenkins-url) jobname)))
+    (when (y-or-n-p (format "Ready to start %s with %d parameters?" jobname (length parameters-alist)))
+      (with-current-buffer (url-retrieve-synchronously build-url)
+        (message (format "Building %s job with parameters started!" jobname))
+        ;; (inspector-inspect (buffer-substring-no-properties (point-min) (point-max))))
+        (kill-buffer (current-buffer))))))
+
+(defun jenkins--set-param-value ()
+  "Set parameter value based on parameter type."
+  (when (and (org-at-table-p)
+             (> (org-table-current-line) 1))
+    (let* ((param-name (string-trim
+                        (substring-no-properties
+                         (org-table-get-field 1))))
+           (param-type (string-trim
+                        (substring-no-properties
+                         (org-table-get-field 2))))
+           (param-value (string-trim
+                         (substring-no-properties
+                          (org-table-get-field 5)))))
+      (cond
+       ((equal param-type "boolean")
+        (org-table-get-field 5 (if (string= param-value "t") "" "t")))
+       ((equal param-type "string")
+        (org-table-get-field 5 (read-string "String value: " param-value)))
+       ((equal param-type "choice")
+        (let ((choices (cdr (assoc param-name jenkins-local-parameter-choices))))
+          (if choices
+              (org-table-get-field 5 (completing-read
+                                      (format "Choose value for %s: " param-name)
+                                      choices nil t param-value))
+            (org-table-get-field 5 (read-string "Choice value: " param-value)))))
+       ((equal param-type "text")
+        (org-table-get-field 5 (read-string "Text value: " param-value))))
+      (org-table-align))))
+
+(defun jenkins--setup-parameters-buffer-keymap (jobname parameters)
+  "Set up local keymap for parameters buffer with JOBNAME and PARAMETERS."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c")
+                (lambda () (interactive) (jenkins--submit-parameters-and-build jenkins-local-jobname jenkins-local-parameters)))
+    (define-key map (kbd "C-c C-e")
+                (lambda () (interactive) (jenkins--set-param-value)))
+    (define-key map (kbd "C-c C-k")
+                (lambda () (interactive) (kill-buffer (current-buffer))))
+    (use-local-map map)))
+
 ;;; actions
 
 (defun jenkins-enter-job (&optional jobindex)
@@ -266,7 +428,8 @@
 
 (defun jenkins--retrieve-page-as-json (url)
   "Shortcut for jenkins api URL to return valid json."
-  (let ((url-request-extra-headers (jenkins--get-auth-headers)))
+  (let ((url-request-extra-headers (jenkins--get-auth-headers))
+        (json-false nil))
     (with-current-buffer (url-retrieve-synchronously url)
       (goto-char (point-min))
       (re-search-forward "^$")
@@ -295,6 +458,20 @@
               (jenkins--extract-time-of-build it 'lastSuccessfulBuild)
               (jenkins--extract-time-of-build it 'lastFailedBuild)))
       jobs))))
+
+(defun jenkins-get-job-parameters (jobname)
+  "Get parameter definitions for JOBNAME from Jenkins API."
+  (let* ((params-url (format "%sjob/%s/api/json?tree=property[parameterDefinitions[name,type,description,defaultParameterValue[value],choices]]"
+                             (get-jenkins-url) jobname))
+         (raw-data (jenkins--retrieve-page-as-json params-url))
+         (properties (cdr (assoc 'property raw-data)))
+         (param-definitions nil))
+    (when properties
+      (cl-loop for prop across properties do
+               (let ((param-defs (cdr (assoc 'parameterDefinitions prop))))
+                 (when param-defs
+                   (setq param-definitions (append param-definitions (append param-defs nil))))))
+      param-definitions)))
 
 (defun jenkins-get-job-details (jobname)
   "Make to particular JOBNAME call."
@@ -424,8 +601,7 @@
 (define-derived-mode jenkins-job-view-mode special-mode "jenkins-job"
   "Mode for viewing jenkins job details"
   ;; buffer defaults
-  (jenkins-job-view-mode-map-setup-for-evil)
-  (setq-local jenkins-local-jobname jobname))
+  (jenkins-job-view-mode-map-setup-for-evil))
 
 (define-derived-mode jenkins-console-output-mode special-mode "jenkins-console-output"
   "Mode for viewing jenkins console output"
@@ -446,10 +622,12 @@
   "Open JOBNAME details screen."
   (interactive)
   (setq jenkins-local-jobs-shown t)
-  (let ((details-buffer-name (format "*jenkins: %s details*" jobname)))
-    (switch-to-buffer details-buffer-name)
-    (jenkins-job-render jobname)
-    (jenkins-job-view-mode)))
+  (let* ((details-buffer-name (format "*jenkins: %s details*" jobname)))
+    (with-current-buffer (get-buffer-create details-buffer-name)
+      (jenkins-job-render jobname)
+      (jenkins-job-view-mode)
+      (setq-local jenkins-local-jobname jobname))
+    (switch-to-buffer details-buffer-name)))
 
 (defun jenkins-job-details-toggle ()
   "Toggle builds list."
@@ -460,21 +638,27 @@
 
 (defun jenkins-job-call-build (jobname)
   "Call jenkins build JOBNAME function."
-  (let ((url-request-extra-headers (jenkins--get-auth-headers))
-        (url-request-method "POST")
-        (build-url (format "%sjob/%s/build" (get-jenkins-url) jobname)))
-    (when (y-or-n-p (format "Ready to start %s?" jobname))
-      (with-current-buffer (url-retrieve-synchronously build-url)
-        (message (format "Building %s job started!" jobname))))))
+  (let ((parameters (jenkins-get-job-parameters jobname)))
+    (if parameters
+        (jenkins--create-parameters-buffer jobname parameters)
+      (let ((url-request-extra-headers (jenkins--get-auth-headers))
+            (url-request-method "POST")
+            (build-url (format "%sjob/%s/build" (get-jenkins-url) jobname)))
+        (when (y-or-n-p (format "Ready to start %s?" jobname))
+          (with-current-buffer (url-retrieve-synchronously build-url)
+            (message (format "Building %s job started!" jobname))))))))
 
 (defun jenkins-job-call-rebuild (jobname)
-  "Call jenkins build JOBNAME function."
-  (let ((url-request-extra-headers (jenkins--get-auth-headers))
-        (url-request-method "GET")
-        (build-url (format "%sjob/%s/lastCompletedBuild/rebuild/" (get-jenkins-url) jobname)))
-    (when (y-or-n-p (format "Ready to rebuild %s?" jobname))
-      (with-current-buffer (url-retrieve-synchronously build-url)
-        (message (format "Building %s job started!" jobname))))))
+  "Call jenkins rebuild JOBNAME function."
+  (let ((parameters (jenkins-get-job-parameters jobname)))
+    (if parameters
+        (jenkins--create-parameters-buffer jobname parameters)
+      (let ((url-request-extra-headers (jenkins--get-auth-headers))
+            (url-request-method "GET")
+            (build-url (format "%sjob/%s/lastCompletedBuild/rebuild/" (get-jenkins-url) jobname)))
+        (when (y-or-n-p (format "Ready to rebuild %s?" jobname))
+          (with-current-buffer (url-retrieve-synchronously build-url)
+            (message (format "Building %s job started!" jobname))))))))
 
 (defun jenkins--call-build-job-from-main-screen ()
   "Build job from main screen."
