@@ -62,6 +62,7 @@
 (defvar jenkins-console-output-mode-map
   (let ((keymap (make-sparse-keymap)))
     (define-key keymap (kbd "q") 'kill-this-buffer)
+    (define-key keymap (kbd "r") 'jenkins--refresh-console-output)
     keymap)
   "Jenkins jobs console output mode keymap.")
 
@@ -133,10 +134,11 @@
   nil
   "Data retrieved from jenkins for main jenkins screen.")
 
-(defvar jenkins-local-jobname)
 (defvar jenkins-local-parameters nil)
 (defvar jenkins-local-parameter-choices nil)
 (defvar jenkins-local-jobs-shown nil)
+(defvar jenkins-local-build-number)
+(defvar jenkins-local-jobname)
 
 (defun jenkins--render-name (item)
   "Render jobname for main jenkins job ITEM screen."
@@ -267,7 +269,7 @@
       (backward-char 1)
       (org-table-align)
       (setq-local truncate-lines t)
-      (setq-local jenkins-local-jobname jobname)
+      (setq jenkins-local-jobname jobname)
       (setq-local jenkins-local-parameters parameters)
       (setq-local jenkins-local-parameter-choices
                   (mapcar (lambda (param)
@@ -522,17 +524,24 @@
 
 (defun jenkins-get-console-output (jobname build)
   "Show the console output for the current job"
-  (let ((url-request-extra-headers (jenkins--get-auth-headers))
-        (console-buffer (get-buffer-create (format "*jenkins-console-%s-%s*" jobname build)))
-        (url (format "%sjob/%s/%s/consoleText" (get-jenkins-url) jobname build)))
-    (with-current-buffer console-buffer
+  (let* ((url-request-extra-headers (jenkins--get-auth-headers))
+         (console-buffer (get-buffer-create (format "*jenkins-console-%s-%s*" jobname build)))
+         (url (format "%sjob/%s/%s/consoleText" (get-jenkins-url) jobname build))
+         (response (with-current-buffer (url-retrieve-synchronously url)
+                     (goto-char url-http-end-of-headers)
+                     (buffer-substring-no-properties (point) (point-max))))
+
+         )
+    (with-current-buffer (get-buffer-create console-buffer)
+      (set-buffer-file-coding-system 'unix)
       (read-only-mode -1)    ; make sure buffer is writable
       (erase-buffer)
-      (with-current-buffer (url-retrieve-synchronously url)
-
-        (copy-to-buffer console-buffer (point-min) (point-max))))
-    (pop-to-buffer console-buffer)
-    (jenkins-console-output-mode)))
+      (insert (replace-regexp-in-string "\r" "" response))
+      (goto-char (point-min))
+      (jenkins-console-output-mode)
+      (setq-local jenkins-local-jobname jobname)
+      (setq-local jenkins-local-build-number build))
+    (pop-to-buffer console-buffer)))
 
 (defun jenkins--visit-job-from-main-screen ()
   "Open browser for current job."
@@ -550,9 +559,10 @@
   (let* ((props (text-properties-at (point) (current-buffer)))
          (jenkins-tag (member 'jenkins-build-number props))
          (build-number (and jenkins-tag
-                            (cadr jenkins-tag))))
+                            (cadr jenkins-tag)))
+         (job-name jenkins-local-jobname))
     (if build-number
-        (jenkins-get-console-output jenkins-local-jobname build-number)
+        (jenkins-get-console-output job-name build-number)
       (error "Not on a Jenkins build line"))))
 
 (defun jenkins-mode-map-setup-for-evil ()
@@ -583,6 +593,14 @@
     (evil-define-key 'normal jenkins-job-view-mode-map
       (kbd "$") 'jenkins--show-console-output-from-job-screen)))
 
+(defun jenkins-console-output-mode-map-setup-for-evil ()
+  "Set up jenkins-console-output-mode-map for evil-mode."
+  (when (bound-and-true-p evil-mode)
+    (evil-define-key 'normal jenkins-console-output-mode-map
+      (kbd "r") 'jenkins--refresh-console-output)
+    (evil-define-key 'normal jenkins-console-output-mode-map
+      (kbd "q") 'kill-this-buffer)))
+
 ;; emacs major mode funcs and variables
 (define-derived-mode jenkins-mode tabulated-list-mode "Jenkins"
   "Special mode for jenkins status buffer."
@@ -605,8 +623,8 @@
 
 (define-derived-mode jenkins-console-output-mode special-mode "jenkins-console-output"
   "Mode for viewing jenkins console output"
-  ;; make buffer readonly
-  (read-only-mode))
+  ;; setup evil mode bindings
+  (jenkins-console-output-mode-map-setup-for-evil))
 
 (defun jenkins-job-render (jobname)
   "Render details buffer for JOBNAME."
@@ -685,6 +703,20 @@
   (interactive)
   (jenkins-job-render jenkins-local-jobname))
 
+(defun jenkins--refresh-console-output ()
+  "Refresh the console output for the current build."
+  (interactive)
+  (when (and jenkins-local-jobname jenkins-local-build-number)
+    (let ((url-request-extra-headers (jenkins--get-auth-headers))
+          (url (format "%sjob/%s/%s/consoleText" (get-jenkins-url) jenkins-local-jobname jenkins-local-build-number)))
+      (save-excursion
+        (read-only-mode -1)
+        (erase-buffer)
+        (with-current-buffer (url-retrieve-synchronously url)
+          (copy-to-buffer (get-buffer (format "*jenkins-console-%s-%s*" jenkins-local-jobname jenkins-local-build-number)) (point-min) (point-max)))
+        (read-only-mode 1))
+      (message "Console output refreshed for %s #%s" jenkins-local-jobname jenkins-local-build-number))))
+
 (defun jenkins-job-details-screen (jobname)
   "Jenkins job detailization screen, JOBNAME."
   (let* ((job-details (jenkins-get-job-details jobname))
@@ -730,7 +762,7 @@
      "View job's page "
      (propertize ";; (press v to open browser)\n" 'font-lock-face 'italic)
      "View job's console output"
-     (propertize ";; (press $ to open a new buffer with the text log)\n" 'font-lock-face 'italic)
+     (propertize ";; (press $ to open a new buffer with the text log; press g in console to refresh)\n" 'font-lock-face 'italic)
      )))
 
 ;;;###autoload
