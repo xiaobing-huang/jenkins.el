@@ -62,7 +62,7 @@
 (defvar jenkins-console-output-mode-map
   (let ((keymap (make-sparse-keymap)))
     (define-key keymap (kbd "q") 'kill-this-buffer)
-    (define-key keymap (kbd "r") 'jenkins--refresh-console-output)
+    (define-key keymap (kbd "g") 'jenkins--refresh-console-output)
     keymap)
   "Jenkins jobs console output mode keymap.")
 
@@ -708,12 +708,15 @@
   (interactive)
   (when (and jenkins-local-jobname jenkins-local-build-number)
     (let ((url-request-extra-headers (jenkins--get-auth-headers))
-          (url (format "%sjob/%s/%s/consoleText" (get-jenkins-url) jenkins-local-jobname jenkins-local-build-number)))
+          (url (format "%sjob/%s/%s/consoleText" (get-jenkins-url) jenkins-local-jobname jenkins-local-build-number))
+          (buf (current-buffer)))
       (save-excursion
         (read-only-mode -1)
-        (erase-buffer)
+        ;; (erase-buffer)
         (with-current-buffer (url-retrieve-synchronously url)
-          (copy-to-buffer (get-buffer (format "*jenkins-console-%s-%s*" jenkins-local-jobname jenkins-local-build-number)) (point-min) (point-max)))
+          (goto-char url-http-end-of-headers)
+          (forward-line)
+          (copy-to-buffer buf (point) (point-max)))
         (read-only-mode 1))
       (message "Console output refreshed for %s #%s" jenkins-local-jobname jenkins-local-build-number))))
 
