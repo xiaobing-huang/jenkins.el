@@ -4,7 +4,7 @@
 
 ;; Author: Rustem Muslimov <r.muslimov@gmail.com>
 ;; Keywords: jenkins, convenience
-;; Package-Requires: ((dash "2.12") (emacs "24.3") (json "1.4"))
+;; Package-Requires: ((dash "2.12") (emacs "29.1") (json "1.4") (transient "0.4.0"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -34,6 +34,8 @@
 (require 'cl-lib)
 (require 'dash)
 (require 'json)
+(require 'vtable)
+(require 'transient)
 
 (defconst jenkins-buffer-name
   "*jenkins: status*"
@@ -41,6 +43,7 @@
 
 (defvar jenkins-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "?") 'jenkins-transient)
     (define-key map (kbd "b") 'jenkins--call-build-job-from-main-screen)
     (define-key map (kbd "r") 'jenkins--call-rebuild-job-from-main-screen)
     (define-key map (kbd "v") 'jenkins--visit-job-from-main-screen)
@@ -50,14 +53,15 @@
 
 (defvar jenkins-job-view-mode-map
   (let ((keymap (make-sparse-keymap)))
+    (define-key keymap (kbd "?") 'jenkins-job-view-transient)
     (define-key keymap (kbd "1") 'jenkins-job-details-toggle)
     (define-key keymap (kbd "g") 'jenkins--refresh-job-from-job-screen)
     (define-key keymap (kbd "b") 'jenkins--call-build-job-from-job-screen)
     (define-key keymap (kbd "r") 'jenkins--call-rebuild-job-from-job-screen)
     (define-key keymap (kbd "v") 'jenkins--visit-job-from-job-screen)
-    (define-key keymap (kbd "$") 'jenkins--show-console-output-from-job-screen)
+    (define-key keymap (kbd "RET") 'jenkins--show-console-from-vtable)
     keymap)
-  "Jenkins jobs status mode keymap.")
+  "Jenkins job view mode keymap.")
 
 (defvar jenkins-console-output-mode-map
   (let ((keymap (make-sparse-keymap)))
@@ -65,6 +69,34 @@
     (define-key keymap (kbd "g") 'jenkins--refresh-console-output)
     keymap)
   "Jenkins jobs console output mode keymap.")
+
+;; Transient menus
+;;;###autoload (autoload 'jenkins-transient "jenkins" "Jenkins main actions." t)
+(transient-define-prefix jenkins-transient ()
+  "Jenkins main actions."
+  [["Build Actions"
+   ("b" "Build job" jenkins--call-build-job-from-main-screen)
+   ("r" "Rebuild job" jenkins--call-rebuild-job-from-main-screen)]
+  ["Navigation"
+   ("RET" "View job details" jenkins-enter-job)
+   ("v" "Open in browser" jenkins--visit-job-from-main-screen)
+   ("g" "Refresh" revert-buffer)]])
+
+;;;###autoload (autoload 'jenkins-job-view-transient "jenkins-jobs" "Jenkins job view actions." t)
+(transient-define-prefix jenkins-job-view-transient ()
+  "Jenkins job view actions."
+  [[:description
+   (lambda ()
+     (format "Job: %s" (or jenkins-local-jobname "N/A")))]
+  ["Build Actions"
+   ("b" "Build now" jenkins--call-build-job-from-job-screen)
+   ("r" "Rebuild last" jenkins--call-rebuild-job-from-job-screen)]
+  ["View"
+   ("v" "Open in browser" jenkins--visit-job-from-job-screen)
+   ("RET" "Console output" jenkins--show-console-from-vtable)]
+  ["Other"
+   ("g" "Refresh" jenkins--refresh-job-from-job-screen)
+   ("1" "Toggle builds list" jenkins-job-details-toggle)]])
 
 (defgroup jenkins nil
   "Interact with a Jenkins CI server."
@@ -168,7 +200,7 @@
   (format (concat
            "%sjob/%s/"
            "api/json?depth=1&tree=builds"
-           "[number,timestamp,result,url,building,"
+           "[number,timestamp,duration,result,url,building,"
            "culprits[fullName]]")
           (get-jenkins-url) jobname))
 
@@ -197,6 +229,46 @@
                        '("FAILURE" . 'error)
                        '("ABORTED" . 'warning))))
     (cdr (assoc result facemap))))
+
+(defun jenkins--format-duration (ms)
+  "Format MS (milliseconds) as a human-readable duration string."
+  (if (or (null ms) (eq ms 0))
+      "---"
+    (let* ((seconds (/ ms 1000))
+           (minutes (/ seconds 60))
+           (secs (mod seconds 60)))
+      (if (>= minutes 60)
+          (format "%dh:%02dm" (/ minutes 60) (mod minutes 60))
+        (format "%dm:%02ds" minutes secs)))))
+
+(defun jenkins--vtable-getter (build column _table)
+  "Get value for BUILD at COLUMN for vtable.
+BUILD is a cons cell (build-number . plist-of-properties)."
+  (let ((data (cdr build))
+        (num (car build)))
+    (pcase column
+      (0 num)                              ; Build number
+      (1 (plist-get data :result))         ; Result
+      (2 (plist-get data :author))         ; Author
+      (3 (plist-get data :timestring))     ; Time
+      (4 (plist-get data :duration)))))    ; Duration
+
+(defun jenkins--vtable-formatter (value column _table)
+  "Format VALUE at COLUMN for vtable display."
+  (pcase column
+    (0 (format "#%d" value))               ; Build number
+    (1 (propertize (or value "BUILDING")   ; Result with face
+                   'face (jenkins--get-proper-face-for-result value)))
+    (4 (jenkins--format-duration value))   ; Duration
+    (_ (or value "---"))))                 ; Default
+
+(defun jenkins--show-console-from-vtable (&rest _)
+  "Show console output for the build under point in vtable."
+  (interactive)
+  (when-let* ((table (vtable-current-table))
+              (build (vtable-current-object)))
+    (let ((build-number (car build)))
+      (jenkins-get-console-output jenkins-local-jobname build-number))))
 
 (defun jenkins--render-indicator (job)
   "Special indicator for each JOB on main jenkins window."
@@ -482,11 +554,12 @@
               (convert-item (item)
                 (list
                  (retrieve 'number item)
-                 :author (let ((culprits (cdr (assoc 'culprits values))))
+                 :author (let ((culprits (cdr (assoc 'culprits item))))
                            (if (> (length culprits) 0)
                                (cdar (aref culprits 0)) "---"))
                  :url (retrieve 'url item)
                  :timestring (jenkins--time-since-to-text (/ (retrieve 'timestamp item) 1000))
+                 :duration (retrieve 'duration item)
                  :building (retrieve 'building item)
                  :result (retrieve 'result item)))
               (vector-take (N vec)
@@ -569,6 +642,8 @@
   "Set up jenkins-mode-map for evil-mode."
   (when (bound-and-true-p evil-mode)
     (evil-define-key 'normal jenkins-mode-map
+      (kbd "?") 'jenkins-transient)
+    (evil-define-key 'normal jenkins-mode-map
       "b" 'jenkins--call-build-job-from-main-screen)
     (evil-define-key 'normal jenkins-mode-map
       (kbd "r") 'jenkins--call-rebuild-job-from-main-screen)
@@ -581,8 +656,10 @@
   "Set up jenkins-job-view-mode-map for evil-mode."
   (when (bound-and-true-p evil-mode)
     (evil-define-key 'normal jenkins-job-view-mode-map
+      (kbd "?") 'jenkins-job-view-transient)
+    (evil-define-key 'normal jenkins-job-view-mode-map
       (kbd "1") 'jenkins-job-details-toggle)
-    (evil-define-key 'insert jenkins-job-view-mode-map
+    (evil-define-key 'normal jenkins-job-view-mode-map
       (kbd "g") 'jenkins--refresh-job-from-job-screen)
     (evil-define-key 'normal jenkins-job-view-mode-map
       (kbd "b") 'jenkins--call-build-job-from-job-screen)
@@ -591,7 +668,7 @@
     (evil-define-key 'normal jenkins-job-view-mode-map
       (kbd "v") 'jenkins--visit-job-from-job-screen)
     (evil-define-key 'normal jenkins-job-view-mode-map
-      (kbd "$") 'jenkins--show-console-output-from-job-screen)))
+      (kbd "RET") 'jenkins--show-console-from-vtable)))
 
 (defun jenkins-console-output-mode-map-setup-for-evil ()
   "Set up jenkins-console-output-mode-map for evil-mode."
@@ -628,13 +705,10 @@
 
 (defun jenkins-job-render (jobname)
   "Render details buffer for JOBNAME."
-  (setq buffer-read-only nil)
-  (erase-buffer)
-  (let ((job (cdr (assoc jobname *jenkins-jobs-list*))))
-    (insert
-     (jenkins-job-details-screen jobname)
-     ))
-  (setq buffer-read-only t))
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (jenkins-job-details-screen jobname)
+    (goto-char (point-min))))
 
 (defun jenkins-job-view (jobname)
   "Open JOBNAME details screen."
@@ -724,52 +798,23 @@
       (message "Console output refreshed for %s #%s" jenkins-local-jobname jenkins-local-build-number))))
 
 (defun jenkins-job-details-screen (jobname)
-  "Jenkins job detailization screen, JOBNAME."
+  "Jenkins job detailization screen, JOBNAME.
+Inserts content directly into the current buffer."
   (let* ((job-details (jenkins-get-job-details jobname))
-         (jobname (plist-get job-details :name))
-         (builds (plist-get job-details :builds))
-         (latest (assoc (plist-get job-details :latestFinished) builds))
-         (latest-result (plist-get (cdr latest) :result))
-         (latestSuccessful
-          (cdr (assoc (plist-get job-details :latestSuccessful) builds)))
-         )
-    (concat
-     (format "Job name:\t%s\n" jobname)
-     "Status:\t\t"
-     (propertize
-      (format "%s\n\n" latest-result)
-      'face (jenkins--get-proper-face-for-result latest-result))
-     (propertize
-      (concat
-       (format
-        "Latest %s builds: "
-        (length builds))
-       (propertize ";; (press 1 to toggle)\n" 'font-lock-face 'italic)
-       (if jenkins-local-jobs-shown
-           (apply 'concat
-                  (--map
-                   (propertize
-                    (format "- Job #%s, %s %s\n"
-                            (car it)
-                            (plist-get (cdr it) :author)
-                            (plist-get (cdr it) :timestring)
-                            )
-                    'jenkins-build-number
-                    (car it)
-                    'face
-                    (jenkins--get-proper-face-for-result
-                     (plist-get (cdr it) :result)
-                     ))
-                   builds)))))
-     "\nBuild now! "
-     (propertize ";; (press b to Build)\n" 'font-lock-face 'italic)
-     "Rebuild last run! "
-     (propertize ";; (press r to Rebuild)\n" 'font-lock-face 'italic)
-     "View job's page "
-     (propertize ";; (press v to open browser)\n" 'font-lock-face 'italic)
-     "View job's console output"
-     (propertize ";; (press $ to open a new buffer with the text log; press g in console to refresh)\n" 'font-lock-face 'italic)
-     )))
+         (builds (plist-get job-details :builds)))
+    ;; Insert vtable when builds are shown
+    (when (and jenkins-local-jobs-shown builds)
+      (make-vtable
+       :columns '((:name "#" :width 6 :align right)
+                  (:name "Result" :width 12)
+                  (:name "Author" :min-width 15)
+                  (:name "Time" :min-width 12)
+                  (:name "Duration" :width 10 :align right))
+       :objects builds
+       :getter #'jenkins--vtable-getter
+       :formatter #'jenkins--vtable-formatter
+       :use-header-line nil
+       :actions '("RET" jenkins--show-console-from-vtable)))))
 
 ;;;###autoload
 (defun jenkins ()
